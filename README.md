@@ -83,7 +83,7 @@ Timestamp,Person_Name,State
 
 Clone the repository:
 
-git clone https://github.com/babu2004/face_tracking_system.git
+git clone https://github.com/babu2004/internship_project.git
 
 Navigate to the project directory:
 
