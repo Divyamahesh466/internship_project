@@ -1,133 +1,107 @@
 import cv2
-import os
 import numpy as np
-from PIL import Image
+from ultralytics import YOLO
+from insightface.app import FaceAnalysis
+import pickle
 
 # ----------------------------
-# Paths
+# Load YOLO (Face Detection)
 # ----------------------------
-DATASET_PATH = "dataset"
-MODEL_PATH = "models"
-
-os.makedirs(MODEL_PATH, exist_ok=True)
+model = YOLO("yolov8n.pt")  # or your custom face model
 
 # ----------------------------
-# Face Detector
+# Load ArcFace (Recognition)
 # ----------------------------
-detector = cv2.CascadeClassifier(
-    cv2.data.haarcascades +
-    "haarcascade_frontalface_default.xml"
-)
+app = FaceAnalysis(name="buffalo_l")
+app.prepare(ctx_id=0, det_size=(640, 640))
 
 # ----------------------------
-# LBPH Recognizer
+# Load embeddings
 # ----------------------------
-recognizer = cv2.face.LBPHFaceRecognizer_create()
+with open("embeddings.pkl", "rb") as f:
+    data = pickle.load(f)
 
-face_samples = []
-ids = []
-
-label_names = {}
-current_id = 0
+known_embeddings = data["embeddings"]
+known_names = data["names"]
 
 # ----------------------------
-# Read Dataset
+# Cosine similarity function
 # ----------------------------
-for person_name in os.listdir(DATASET_PATH):
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-    person_folder = os.path.join(
-        DATASET_PATH,
-        person_name
-    )
+# ----------------------------
+# Webcam
+# ----------------------------
+cap = cv2.VideoCapture(0)
 
-    if not os.path.isdir(person_folder):
-        continue
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-    print(f"[INFO] Processing {person_name}")
+    # ----------------------------
+    # YOLO Detection + ByteTrack
+    # ----------------------------
+    results = model.track(frame, persist=True, verbose=False)
 
-    label_names[current_id] = person_name
+    for r in results:
+        if r.boxes is None:
+            continue
 
-    for image_name in os.listdir(person_folder):
+        boxes = r.boxes
 
-        image_path = os.path.join(
-            person_folder,
-            image_name
-        )
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            track_id = int(box.id[0]) if box.id is not None else -1
 
-        try:
-            img = Image.open(
-                image_path
-            ).convert("L")
+            face_crop = frame[y1:y2, x1:x2]
 
-            img_numpy = np.array(
-                img,
-                "uint8"
+            if face_crop.size == 0:
+                continue
+
+            # ----------------------------
+            # ArcFace recognition
+            # ----------------------------
+            faces = app.get(face_crop)
+
+            name = "Unknown"
+
+            if len(faces) > 0:
+                emb = faces[0].embedding
+
+                best_score = -1
+                best_name = "Unknown"
+
+                for i, known_emb in enumerate(known_embeddings):
+                    score = cosine_similarity(emb, known_emb)
+
+                    if score > best_score:
+                        best_score = score
+                        best_name = known_names[i]
+
+                if best_score > 0.4:  # threshold
+                    name = best_name
+
+            # ----------------------------
+            # Draw results
+            # ----------------------------
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            cv2.putText(
+                frame,
+                f"{name} ID:{track_id}",
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2
             )
 
-            faces = detector.detectMultiScale(
-                img_numpy,
-                scaleFactor=1.1,
-                minNeighbors=5
-            )
+    cv2.imshow("YOLO + ByteTrack + ArcFace", frame)
 
-            for (x, y, w, h) in faces:
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-                face_samples.append(
-                    img_numpy[y:y+h, x:x+w]
-                )
-
-                ids.append(current_id)
-
-        except Exception as e:
-            print(
-                f"Error reading {image_path}: {e}"
-            )
-
-    current_id += 1
-
-# ----------------------------
-# Train Model
-# ----------------------------
-print(
-    f"\nTraining using "
-    f"{len(face_samples)} face samples..."
-)
-
-recognizer.train(
-    face_samples,
-    np.array(ids)
-)
-
-# ----------------------------
-# Save Model
-# ----------------------------
-trainer_file = os.path.join(
-    MODEL_PATH,
-    "trainer.yml"
-)
-
-recognizer.save(trainer_file)
-
-# ----------------------------
-# Save Labels
-# ----------------------------
-labels_file = os.path.join(
-    MODEL_PATH,
-    "labels.txt"
-)
-
-with open(labels_file, "w") as f:
-
-    for id_, name in label_names.items():
-
-        f.write(
-            f"{id_},{name}\n"
-        )
-
-print("\nTraining Completed")
-print(
-    f"Model saved -> {trainer_file}"
-)
-print(
-    f"Labels saved -> {labels_file}"
-)
+cap.release()
+cv2.destroyAllWindows()

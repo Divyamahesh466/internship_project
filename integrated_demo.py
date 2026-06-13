@@ -1,239 +1,113 @@
 import cv2
+import numpy as np
+from ultralytics import YOLO
+from insightface.app import FaceAnalysis
+import pickle
 
-from config import *
+# ----------------------------
+# YOLO MODEL (Detection + Tracking)
+# ----------------------------
+model = YOLO("yolov8n.pt")  
+# NOTE: YOLO already supports ByteTrack internally via track()
 
-from logger import (
-    initialize_log,
-    log_event
-)
+# ----------------------------
+# ArcFace (Recognition)
+# ----------------------------
+app = FaceAnalysis(name="buffalo_l")
+app.prepare(ctx_id=0, det_size=(640, 640))
 
-from state_manager import (
-    StateManager
-)
+# ----------------------------
+# Load embeddings
+# ----------------------------
+with open("embeddings.pkl", "rb") as f:
+    data = pickle.load(f)
 
-# -----------------------------
-# Initialize
-# -----------------------------
+known_embeddings = data["embeddings"]
+known_names = data["names"]
 
-initialize_log()
+# ----------------------------
+# Cosine similarity
+# ----------------------------
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-state_manager = StateManager()
-
-# -----------------------------
-# Face Detector
-# -----------------------------
-
-face_detector = cv2.CascadeClassifier(
-    cv2.data.haarcascades +
-    "haarcascade_frontalface_default.xml"
-)
-
-# -----------------------------
-# Recognizer
-# -----------------------------
-
-recognizer = cv2.face.LBPHFaceRecognizer_create()
-
-recognizer.read(
-    MODEL_PATH
-)
-
-# -----------------------------
-# Labels
-# -----------------------------
-
-labels = {}
-
-with open(
-    LABELS_PATH,
-    "r"
-) as f:
-
-    for line in f:
-
-        idx, name = (
-            line
-            .strip()
-            .split(",")
-        )
-
-        labels[int(idx)] = name
-
-# -----------------------------
-# Video
-# -----------------------------
-
-cap = cv2.VideoCapture(
-    VIDEO_PATH
-)
-
-if not cap.isOpened():
-
-    print("Video not found")
-    exit()
-
-# -----------------------------
-# Main Loop
-# -----------------------------
+# ----------------------------
+# Webcam
+# ----------------------------
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 while True:
-
     ret, frame = cap.read()
-
     if not ret:
         break
 
-    gray = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
-    )
+    # ----------------------------
+    # YOLO + BYTE TRACK
+    # ----------------------------
+    results = model.track(frame, persist=True, verbose=False)
 
-    # -------------------------
-    # Draw Monitor Zone
-    # -------------------------
+    for r in results:
+        if r.boxes is None:
+            continue
 
-    cv2.rectangle(
-        frame,
-        (ZONE_X1, ZONE_Y1),
-        (ZONE_X2, ZONE_Y2),
-        BOUNDARY_COLOR,
-        3
-    )
+        boxes = r.boxes
 
-    cv2.putText(
-        frame,
-        "MONITOR ZONE",
-        (ZONE_X1, ZONE_Y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        BOUNDARY_COLOR,
-        2
-    )
+        for box in boxes:
 
-    # -------------------------
-    # Face Detection
-    # -------------------------
+            # bounding box
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-    faces = face_detector.detectMultiScale(
-        gray,
-        scaleFactor=1.2,
-        minNeighbors=5
-    )
+            # TRACK ID (ByteTrack)
+            track_id = int(box.id[0]) if box.id is not None else -1
 
-    for (x, y, w, h) in faces:
+            # crop face region
+            face_crop = frame[y1:y2, x1:x2]
 
-        face_roi = gray[
-            y:y+h,
-            x:x+w
-        ]
+            if face_crop.size == 0:
+                continue
 
-        # ---------------------
-        # Recognition
-        # ---------------------
+            # ----------------------------
+            # ARCFACE RECOGNITION
+            # ----------------------------
+            faces = app.get(face_crop)
 
-        try:
+            name = "Unknown"
 
-            person_id, confidence = recognizer.predict(face_roi)
+            if len(faces) > 0:
+                emb = faces[0].embedding
 
+                best_score = -1
+                best_name = "Unknown"
 
-            if confidence < CONFIDENCE_THRESHOLD:
+                for i, known_emb in enumerate(known_embeddings):
+                    score = cosine_similarity(emb, known_emb)
 
-                person_name = labels[person_id]
+                    if score > best_score:
+                        best_score = score
+                        best_name = known_names[i]
 
-                last_known_name = person_name
+                if best_score > 0.4:
+                    name = best_name
 
-            else:
+            # ----------------------------
+            # DRAW OUTPUT
+            # ----------------------------
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                person_name = last_known_name
-
-        except:
-
-            person_name = "Unknown"
-
-        # ---------------------
-        # Center Point
-        # ---------------------
-
-        cx = x + w // 2
-        cy = y + h // 2
-
-        inside_zone = (
-
-            ZONE_X1 <= cx <= ZONE_X2
-
-            and
-
-            ZONE_Y1 <= cy <= ZONE_Y2
-
-        )
-
-        # ---------------------
-        # State Machine
-        # ---------------------
-
-        current_state, event = (
-            state_manager.update_state(
-                person_name,
-                inside_zone
-            )
-        )
-
-        if (
-            event is not None
-            and
-            person_name != "Unknown"
-        ):
-
-            log_event(
-                person_name,
-                event
+            cv2.putText(
+                frame,
+                f"{name} ID:{track_id}",
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
             )
 
-        # ---------------------
-        # Draw Face Box
-        # ---------------------
+    cv2.imshow("YOLO + BYTE TRACK + ARCFACE", frame)
 
-        cv2.rectangle(
-            frame,
-            (x, y),
-            (x+w, y+h),
-            FACE_BOX_COLOR,
-            2
-        )
-
-        cv2.putText(
-            frame,
-            f"{person_name}",
-            (x, y-40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            TEXT_COLOR,
-            2
-        )
-
-        cv2.putText(
-            frame,
-            f"State: {current_state}",
-            (x, y-10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            TEXT_COLOR,
-            2
-        )
-
-   
-    cv2.imshow(
-        "Face Tracking System",
-        frame
-    )
-
-    if (
-        cv2.waitKey(25)
-        & 0xFF
-        == ord("q")
-    ):
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
-
 cv2.destroyAllWindows()
