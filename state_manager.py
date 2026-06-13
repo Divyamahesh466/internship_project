@@ -1,27 +1,48 @@
 import cv2
+import pickle
+import numpy as np
+from ultralytics import YOLO
+from insightface.app import FaceAnalysis
 
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades +
-    "haarcascade_frontalface_default.xml"
-)
+# ----------------------------
+# YOLO MODEL
+# ----------------------------
+model = YOLO("yolov8n.pt")
 
+# ----------------------------
+# ARCFACE MODEL
+# ----------------------------
+app = FaceAnalysis(name="buffalo_l")
+app.prepare(ctx_id=0, det_size=(640, 640))
+
+# ----------------------------
+# LOAD DATABASE
+# ----------------------------
+with open("embeddings.pkl", "rb") as f:
+    db = pickle.load(f)
+
+# ----------------------------
+# COSINE SIMILARITY
+# ----------------------------
+def cosine_sim(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+# ----------------------------
+# STATE MANAGER
+# ----------------------------
 class StateManager:
     def __init__(self):
         self.state = "OUTSIDE"
 
     def update(self, inside_zone):
-        if inside_zone:
-            self.state = "INSIDE"
-        else:
-            self.state = "OUTSIDE"
+        self.state = "INSIDE" if inside_zone else "OUTSIDE"
         return self.state
-
 
 state_manager = StateManager()
 
-person_id = 1
-person_name = "Divya"
-
+# ----------------------------
+# CAMERA
+# ----------------------------
 cap = cv2.VideoCapture(0)
 
 while True:
@@ -32,70 +53,99 @@ while True:
     h, w, _ = frame.shape
 
     # ----------------------------
-    # LEFT ZONE
+    # ZONE (LEFT AREA)
     # ----------------------------
     zx1, zy1 = 0, 0
     zx2, zy2 = int(w * 0.4), h
 
-    cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), (0, 255, 0), 3)
+    cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), (0, 255, 0), 2)
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.1, 5)
+    # ----------------------------
+    # YOLO DETECTION
+    # ----------------------------
+    results = model(frame)
 
-    inside_zone = False
+    for r in results:
+        for box in r.boxes:
 
-    for (x, y, fw, fh) in faces:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            face_crop = frame[y1:y2, x1:x2]
 
-        cx = x + fw // 2
+            if face_crop.size == 0:
+                continue
 
-        # zone check
-        if cx < zx2:
-            inside_zone = True
+            # ----------------------------
+            # ARCFACE EMBEDDING
+            # ----------------------------
+            faces = app.get(face_crop)
 
-        state = state_manager.update(inside_zone)
+            if len(faces) == 0:
+                continue
 
-        # ----------------------------
-        # COLOR ONLY CHANGES
-        # ----------------------------
-        if state == "INSIDE":
-            color = (255, 0, 0)   # BLUE
-            label = "INSIDE"
-        else:
-            color = (0, 0, 255)   # RED
-            label = "OUTSIDE"
+            emb = faces[0].embedding
 
-        # ----------------------------
-        # FACE BOX (ALWAYS SHOWN)
-        # ----------------------------
-        cv2.rectangle(frame, (x, y), (x+fw, y+fh), color, 2)
+            # ----------------------------
+            # MATCHING
+            # ----------------------------
+            name = "Unknown"
+            best_score = -1
 
-        # ----------------------------
-        # NAME + ID ALWAYS SHOWN
-        # ----------------------------
-        cv2.putText(
-            frame,
-            f"{person_name} ID:{person_id}",
-            (x, y - 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2
-        )
+            for person, db_emb in db.items():
+                score = cosine_sim(emb, db_emb)
 
-        # STATE SHOWN
-        cv2.putText(
-            frame,
-            label,
-            (x, y - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            color,
-            2
-        )
+                if score > best_score:
+                    best_score = score
+                    name = person
 
-    cv2.imshow("ZONE SYSTEM", frame)
+            if best_score < 0.4:
+                name = "Unknown"
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+            # ----------------------------
+            # STATE CHECK (ZONE)
+            # ----------------------------
+            cx = x1 + (x2 - x1) // 2
+            inside_zone = cx < zx2
+
+            state = state_manager.update(inside_zone)
+
+            # ----------------------------
+            # COLOR BASED ON STATE
+            # ----------------------------
+            if state == "INSIDE":
+                color = (255, 0, 0)  # BLUE
+            else:
+                color = (0, 0, 255)  # RED
+
+            # ----------------------------
+            # DRAW BOX
+            # ----------------------------
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+            # NAME + SCORE
+            cv2.putText(
+                frame,
+                f"{name} {best_score:.2f}",
+                (x1, y1 - 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+
+            # STATE
+            cv2.putText(
+                frame,
+                state,
+                (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2
+            )
+
+    cv2.imshow("YOLO + ARCFACE + STATE SYSTEM", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
 cap.release()
