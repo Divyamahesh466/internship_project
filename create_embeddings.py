@@ -1,7 +1,14 @@
+import os
 import cv2
 import pickle
-import os
+import numpy as np
 from insightface.app import FaceAnalysis
+
+# ----------------------------
+# DATASET PATH
+# ----------------------------
+DATASET_PATH = "Data Set"
+OUTPUT_FILE = "embeddings.pkl"
 
 # ----------------------------
 # ARCFACE MODEL
@@ -10,60 +17,64 @@ app = FaceAnalysis(name="buffalo_l")
 app.prepare(ctx_id=0, det_size=(640, 640))
 
 # ----------------------------
-# DATASET PATH (YOUR FOLDER NAME)
+# STORAGE
 # ----------------------------
-DATASET_PATH = "Data Set"
-
-# ----------------------------
-# GET EMBEDDING FUNCTION
-# ----------------------------
-def get_embedding(img_path):
-    print("Loading:", img_path)
-
-    img = cv2.imread(img_path)
-
-    if img is None:
-        print("❌ Image not found:", img_path)
-        return None
-
-    faces = app.get(img)
-
-    if len(faces) == 0:
-        print("❌ No face detected:", img_path)
-        return None
-
-    return faces[0].embedding
+embeddings = []
+names = []
 
 # ----------------------------
-# DATABASE
+# CHECK DATASET FOLDER
 # ----------------------------
-db = {}
-
-# ----------------------------
-# SCAN DATASET FOLDER
-# ----------------------------
-for file in os.listdir(DATASET_PATH):
-
-    if file.lower().endswith((".jpg", ".jpeg", ".png")):
-
-        name = os.path.splitext(file)[0]   # file name = person name
-        path = os.path.join(DATASET_PATH, file)
-
-        emb = get_embedding(path)
-
-        if emb is not None:
-            db[name] = emb
+if not os.path.exists(DATASET_PATH):
+    print("❌ Dataset folder not found!")
+    exit()
 
 # ----------------------------
-# SAVE EMBEDDINGS
+# PROCESS DATASET
 # ----------------------------
-with open("embeddings.pkl", "wb") as f:
-    pickle.dump(db, f)
+for person_folder in os.listdir(DATASET_PATH):
+
+    person_path = os.path.join(DATASET_PATH, person_folder)
+
+    if not os.path.isdir(person_path):
+        continue
+
+    print(f"[INFO] Processing: {person_folder}")
+
+    for img_name in os.listdir(person_path):
+
+        img_path = os.path.join(person_path, img_name)
+
+        img = cv2.imread(img_path)
+
+        if img is None:
+            print("❌ Cannot read:", img_path)
+            continue
+
+        faces = app.get(img)
+
+        if len(faces) == 0:
+            print("❌ No face:", img_path)
+            continue
+
+        emb = faces[0].embedding
+
+        # NORMALIZE (IMPORTANT FOR ACCURACY)
+        emb = emb / np.linalg.norm(emb)
+
+        embeddings.append(emb)
+        names.append(person_folder)
+
+# ----------------------------
+# SAVE PKL FILE
+# ----------------------------
+data = {
+    "embeddings": np.array(embeddings),
+    "names": names
+}
+
+with open(OUTPUT_FILE, "wb") as f:
+    pickle.dump(data, f)
 
 print("\n✅ embeddings.pkl created successfully")
-
-# ----------------------------
-# DEBUG CHECK
-# ----------------------------
-for k, v in db.items():
-    print(k, v.shape)
+print("Total faces:", len(embeddings))
