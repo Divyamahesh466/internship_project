@@ -11,10 +11,18 @@ DATASET_PATH = "Data Set"
 OUTPUT_FILE = "embeddings.pkl"
 
 # ----------------------------
-# ARCFACE MODEL
+# ARCFACE MODEL (InsightFace)
 # ----------------------------
 app = FaceAnalysis(name="buffalo_l")
-app.prepare(ctx_id=0, det_size=(640, 640))
+
+# GPU fallback (safe)
+ctx_id = 0  # GPU
+try:
+    app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+    print("[INFO] Using GPU")
+except:
+    app.prepare(ctx_id=-1, det_size=(640, 640))
+    print("[INFO] GPU not found, using CPU")
 
 # ----------------------------
 # STORAGE
@@ -23,7 +31,7 @@ embeddings = []
 names = []
 
 # ----------------------------
-# CHECK DATASET FOLDER
+# CHECK DATASET
 # ----------------------------
 if not os.path.exists(DATASET_PATH):
     print("❌ Dataset folder not found!")
@@ -39,7 +47,7 @@ for person_folder in os.listdir(DATASET_PATH):
     if not os.path.isdir(person_path):
         continue
 
-    print(f"[INFO] Processing: {person_folder}")
+    print(f"[INFO] Processing person: {person_folder}")
 
     for img_name in os.listdir(person_path):
 
@@ -48,33 +56,38 @@ for person_folder in os.listdir(DATASET_PATH):
         img = cv2.imread(img_path)
 
         if img is None:
-            print("❌ Cannot read:", img_path)
+            print(f"❌ Cannot read image: {img_path}")
             continue
 
         faces = app.get(img)
 
         if len(faces) == 0:
-            print("❌ No face:", img_path)
+            print(f"❌ No face detected: {img_path}")
             continue
 
+        # Take first face only
         emb = faces[0].embedding
 
-        # NORMALIZE (IMPORTANT FOR ACCURACY)
+        # Normalize embedding (VERY IMPORTANT for ArcFace)
         emb = emb / np.linalg.norm(emb)
 
         embeddings.append(emb)
-        names.append(person_folder)
+        names.append(person_folder.strip())
 
 # ----------------------------
-# SAVE PKL FILE
+# SAVE DATA
 # ----------------------------
 data = {
     "embeddings": np.array(embeddings),
-    "names": names
+    "names": np.array(names)
 }
 
 with open(OUTPUT_FILE, "wb") as f:
     pickle.dump(data, f)
 
-print("\n✅ embeddings.pkl created successfully")
-print("Total faces:", len(embeddings))
+# ----------------------------
+# SUMMARY
+# ----------------------------
+print("\n✅ embeddings.pkl created successfully!")
+print("Total embeddings:", len(embeddings))
+print("Total persons:", len(set(names)))
